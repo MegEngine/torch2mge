@@ -233,38 +233,56 @@ def visit_module(name, module, ctx: VisitorContext):
     ctx.parent_module.pop(-1)
 
 
+class CodeWriter:
+    def __init__(self):
+        self.scope = []
+        self.code = []
+
+    def set_scope(self, scope):
+        for i, s in enumerate(scope):
+            if i >= len(self.scope) or self.scope[i] != s:
+                self.code.append(" " * (4 * i) + f'with name_scope("{s}"):')
+        self.scope = scope
+
+    def write_code(self, code):
+        self.code.append(" " * (4 * len(self.scope)) + code)
+
+
 def convert_code(symbolic_traced):
-    code = []
+    writer = CodeWriter()
     for node in list(symbolic_traced.graph.nodes):
         if node.op == "call_module":
             target = ["root"] + node.target.split(".")
-            code.append(
+            writer.set_scope(node.target.split(".")[:-1])
+            writer.write_code(
                 f"{node.name}={_get_target(target)}({_format_args(node.args, node.kwargs)})"
             )
         elif node.op == "call_function":
             cvt = function_converter_factory(node.target)(node)
-            code.append(f"{node.name}={cvt.convert(node.args, node.kwargs)}")
+            writer.write_code(f"{node.name}={cvt.convert(node.args, node.kwargs)}")
         elif node.op == "call_method":
             target = node.target
             if target == "contiguous":
-                code.append(f"{node.name}={node.args[0]}")
+                writer.write_code(f"{node.name}={node.args[0]}")
             elif target == "view":
-                code.append(f"{node.name}={node.args[0]}.reshape{node.args[1:]}")
+                writer.write_code(f"{node.name}={node.args[0]}.reshape{node.args[1:]}")
             elif target == "size":
                 if len(node.args) > 1:
-                    code.append(f"{node.name}={node.args[0]}.shape[{node.args[1]}]")
+                    writer.write_code(
+                        f"{node.name}={node.args[0]}.shape[{node.args[1]}]"
+                    )
                 else:
-                    code.append(f"{node.name}={node.args[0]}.shape")
+                    writer.write_code(f"{node.name}={node.args[0]}.shape")
             elif target == "chunk":
-                code.append(
+                writer.write_code(
                     f"{node.name}=F.split({node.args[0]}, {node.args[1]}, axis={node.kwargs['dim']})"
                 )
             else:
-                code.append(f"{node.name}={node.args[0]}.{target}{node.args[1:]}")
+                writer.write_code(f"{node.name}={node.args[0]}.{target}{node.args[1:]}")
         elif node.op == "output":
-            code.append(f"return {node.args[0]}")
+            writer.write_code(f"return {node.args[0]}")
 
-    return code
+    return writer.code
 
 
 template = """import operator
@@ -272,7 +290,10 @@ import pickle
 import numpy as np
 import megengine.module as M
 import megengine.functional as F
+
+from contextlib import contextmanager
 from megengine import jit, tensor
+from megengine.utils.naming import AutoNaming
 
 
 class Module(M.Module):
@@ -288,6 +309,11 @@ class Helper:
         pat[a], pat[b] = pat[b], pat[a]
         return pat
     
+@contextmanager
+def name_scope(name):
+    AutoNaming.push_scope(name)
+    yield
+    AutoNaming.pop_scope()
 
 {module_code}
 
@@ -305,7 +331,7 @@ data = tensor(np.random.random([1, 3, 224, 224]).astype(np.float32))
 
 root.eval()
 ret = forward(data)
-forward.dump("model.mgb", arg_names=["data"])
+forward.dump("model.mgo", arg_names=["data"], optimize_for_inference=False, keep_var_name=2, keep_opr_name=True)
 """
 
 
