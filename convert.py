@@ -235,16 +235,27 @@ def visit_module(name, module, ctx: VisitorContext):
 
 def convert_code(symbolic_traced):
     code = []
+    scope = "root"
     for node in list(symbolic_traced.graph.nodes):
+        prev_scope = scope
+
         if node.op == "call_module":
+            scope = ".".join(str(node.target).split(".")[:-1])
+            if scope != "":
+                scope = "root." + scope
+            else:
+                scope = "root"
+            code.append(f'AutoNaming.push_scope("{scope}")')
             target = ["root"] + node.target.split(".")
             code.append(
                 f"{node.name}={_get_target(target)}({_format_args(node.args, node.kwargs)})"
             )
         elif node.op == "call_function":
+            code.append(f'AutoNaming.push_scope("{prev_scope}")')
             cvt = function_converter_factory(node.target)(node)
             code.append(f"{node.name}={cvt.convert(node.args, node.kwargs)}")
         elif node.op == "call_method":
+            code.append(f'AutoNaming.push_scope("{prev_scope}")')
             target = node.target
             if target == "contiguous":
                 code.append(f"{node.name}={node.args[0]}")
@@ -264,6 +275,9 @@ def convert_code(symbolic_traced):
         elif node.op == "output":
             code.append(f"return {node.args[0]}")
 
+        if not node.op in ["output", "placeholder"]:
+            code.append("AutoNaming.pop_scope()")
+
     return code
 
 
@@ -273,6 +287,7 @@ import numpy as np
 import megengine.module as M
 import megengine.functional as F
 from megengine import jit, tensor
+from megengine.utils.naming import AutoNaming
 
 
 class Module(M.Module):
@@ -287,7 +302,7 @@ class Helper:
         pat = list(range(ndim))
         pat[a], pat[b] = pat[b], pat[a]
         return pat
-    
+
 
 {module_code}
 
@@ -305,7 +320,7 @@ data = tensor(np.random.random([1, 3, 224, 224]).astype(np.float32))
 
 root.eval()
 ret = forward(data)
-forward.dump("model.mgb", arg_names=["data"])
+forward.dump("model.mgo", arg_names=["data"], optimize_for_inference=False, keep_var_name=2,  keep_opr_name=True)
 """
 
 
